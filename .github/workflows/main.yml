@@ -1,0 +1,147 @@
+name: Build OTP
+on:
+  schedule:
+    # Run nightly at 00:00
+    - cron: '0 0 * * *'
+
+  workflow_dispatch:
+    inputs:
+      otp-ref-name:
+        required: true
+      otp-ref:
+        required: true
+      openssl-version:
+        default: "3.1.6"
+jobs:
+  schedule:
+    name: "Schedule nightly"
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      workflows: write
+    steps:
+      - run: |
+          # ref=$(gh api repos/erlang/otp/commits/master --jq .sha)
+          # gh workflow run --repo elixir-install/otp_builds main.yml --field otp-ref-name=master --field otp-ref=$ref
+
+          ref=$(gh api repos/erlang/otp/commits/maint --jq .sha)
+          gh workflow run --repo elixir-install/otp_builds main.yml --field otp-ref-name=maint --field otp-ref=$ref
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build_macos:
+    name: "Build ${{ inputs.otp-ref-name }}-macos-${{ matrix.arch }}"
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      OTP_REF_NAME: ${{ inputs.otp-ref-name }}
+      OPENSSL_VERSION: ${{ inputs.openssl-version }}
+      OTP_DIR: /tmp/builds/otp-${{ inputs.otp-ref-name }}-${{ inputs.otp-ref }}-openssl-${{ inputs.openssl-version }}-macos-${{ matrix.arch }}
+      OTP_REF: ${{ inputs.otp-ref }}
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/builds/openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
+
+      - uses: actions/cache@v4
+        id: otp-cache
+        with:
+          path: ${{ env.OTP_DIR }}
+          key: otp-${{ env.OTP_REF }}-openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
+
+      - name: Build OTP
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        run: |
+          sh scripts/build_otp_macos.sh "${{ env.OTP_REF_NAME }}" "${{ env.OTP_REF }}" "${{ matrix.arch }}"
+
+      - name: Upload
+        run: |
+          otp_tgz=${{ env.OTP_REF_NAME }}-macos-${{ matrix.arch }}.tar.gz
+          tar czf ${otp_tgz} --cd ${{ env.OTP_DIR }} .
+
+          gh release create -R elixir-install/otp_builds ${{ env.OTP_REF_NAME }} || true
+          gh release upload --clobber -R elixir-install/otp_builds ${{ env.OTP_REF_NAME }} ${otp_tgz}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build_windows:
+    name: "Build ${{ inputs.otp-ref-name }}-windows-amd64"
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    env:
+      OTP_REF_NAME: ${{ inputs.otp-ref-name }}
+      OPENSSL_VERSION: ${{ inputs.openssl-version }}
+      OPENSSL_DIR: "c:\\OpenSSL-Win64"
+      OTP_DIR: "otp\\release\\win32"
+      OTP_REF: ${{ inputs.otp-ref }}
+    steps:
+      - uses: actions/cache@v4
+        id: openssl-cache
+        with:
+          path: ${{ env.OPENSSL_DIR }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-windows-amd64
+
+      - name: Install OpenSSL
+        shell: cmd
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          choco install openssl --version=${{ env.OPENSSL_VERSION }}
+          IF EXIST "c:\\Program Files\\OpenSSL-Win64" (move "c:\\Program Files\\OpenSSL-Win64" "${{ env.OPENSSL_DIR }}") ELSE (move "c:\\Program Files\\OpenSSL" "${{ env.OPENSSL_DIR }}")
+
+      - uses: actions/cache@v4
+        id: otp-cache
+        with:
+          path: ${{ env.OTP_DIR }}
+          key: otp-${{ env.OTP_REF }}-openssl-${{ env.OPENSSL_VERSION }}-windows-amd64
+
+      - uses: actions/checkout@v4
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+
+      - uses: Vampire/setup-wsl@v3.0.0
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        with:
+          distribution: Ubuntu-22.04
+
+      - name: Install WSL dependencies
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        run: apt update && apt install -y g++-mingw-w64 gcc-mingw-w64 make autoconf unzip
+
+      - name: Build OTP
+        if: steps.otp-cache.outputs.cache-hit != 'true'
+        run: |
+          url=https://github.com/erlang/otp
+          git clone --depth 1 ${url} --branch ${{ env.OTP_REF_NAME }} otp
+
+          cd otp
+          export ERL_TOP=`pwd`
+          export MAKEFLAGS=-j$(($(nproc) + 2))
+          export ERLC_USE_SERVER=true
+          export ERTS_SKIP_DEPEND=true
+          eval `./otp_build env_win32 x64`
+          ./otp_build configure --without-{javac,odbc,wx,observer,debugger,et}
+          ./otp_build boot -a
+          ./otp_build release -a
+
+      - name: Upload
+        shell: pwsh
+        run: |
+          $otp_zip = "${env:GITHUB_WORKSPACE}\$($env:OTP_REF_NAME)-windows-amd64.zip"
+          Set-Location "otp/release/win32"
+          Compress-Archive -Path * -DestinationPath $otp_zip
+          gh release create -R elixir-install/otp_builds $env:OTP_REF_NAME
+          gh release upload --clobber -R elixir-install/otp_builds $env:OTP_REF_NAME $otp_zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
