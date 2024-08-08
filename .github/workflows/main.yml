@@ -12,13 +12,13 @@ on:
         required: true
       openssl-version:
         default: "3.1.6"
+      wxwidgets-version:
+        default: "3.2.5"
 jobs:
   schedule:
     name: "Schedule nightly"
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    permissions:
-      workflows: write
     steps:
       - run: |
           # ref=$(gh api repos/erlang/otp/commits/master --jq .sha)
@@ -30,41 +30,55 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build_macos:
-    name: "Build ${{ inputs.otp-ref-name }}-macos-${{ matrix.arch }}"
+    name: "Build ${{ inputs.otp-ref-name }}-macos-${{ matrix.pair.arch }}"
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
+    runs-on: ${{ matrix.pair.os }}
     permissions:
       contents: write
     env:
       OTP_REF_NAME: ${{ inputs.otp-ref-name }}
       OPENSSL_VERSION: ${{ inputs.openssl-version }}
-      OTP_DIR: /tmp/builds/otp-${{ inputs.otp-ref-name }}-${{ inputs.otp-ref }}-openssl-${{ inputs.openssl-version }}-macos-${{ matrix.arch }}
+      OPENSSL_DIR: /tmp/builds/openssl-${{ inputs.openssl-version }}-macos-${{ matrix.pair.arch }}
+      WXWIDGETS_VERSION: ${{ inputs.wxwidgets-version }}
+      WXWIDGETS_DIR: /tmp/builds/wxwidgets-${{ inputs.wxwidgets-version }}-macos-${{ matrix.pair.arch }}
+      OTP_DIR: /tmp/builds/otp-${{ inputs.otp-ref-name }}-${{ inputs.otp-ref }}-openssl-${{ inputs.openssl-version }}-macos-${{ matrix.pair.arch }}
       OTP_REF: ${{ inputs.otp-ref }}
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - pair:
+              os: macos-13
+              arch: amd64
+          - pair:
+              os: macos-14
+              arch: arm64
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/cache@v4
         with:
-          path: /tmp/builds/openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
-          key: openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
+          path: ${{ env.OPENSSL_DIR }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.pair.arch }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.WXWIDGETS_DIR }}
+          key: wxwidgets-${{ env.WXWIDGETS_VERSION }}-macos-${{ matrix.pair.arch }}
 
       - uses: actions/cache@v4
         id: otp-cache
         with:
           path: ${{ env.OTP_DIR }}
-          key: otp-${{ env.OTP_REF }}-openssl-${{ env.OPENSSL_VERSION }}-macos-${{ matrix.arch }}
+          key: otp-${{ env.OTP_REF }}-openssl-${{ env.OPENSSL_VERSION }}-wxwidgets-${{ env.WXWIDGETS_VERSION }}-macos-${{ matrix.pair.arch }}
 
       - name: Build OTP
         if: steps.otp-cache.outputs.cache-hit != 'true'
         run: |
-          sh scripts/build_otp_macos.sh "${{ env.OTP_REF_NAME }}" "${{ env.OTP_REF }}" "${{ matrix.arch }}"
+          sh scripts/build_otp_macos.sh "${{ env.OTP_REF_NAME }}" "${{ env.OTP_REF }}" "${{ matrix.pair.arch }}"
 
       - name: Upload
         run: |
-          otp_tgz=${{ env.OTP_REF_NAME }}-macos-${{ matrix.arch }}.tar.gz
+          otp_tgz=${{ env.OTP_REF_NAME }}-macos-${{ matrix.pair.arch }}.tar.gz
           tar czf ${otp_tgz} --cd ${{ env.OTP_DIR }} .
 
           gh release create -R elixir-install/otp_builds ${{ env.OTP_REF_NAME }} || true
